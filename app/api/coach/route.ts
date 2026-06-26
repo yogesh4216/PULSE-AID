@@ -1,62 +1,111 @@
-import { streamText } from 'ai'
-import type { CoachRequest } from '@/lib/types'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
+export const runtime = 'nodejs'
 export const maxDuration = 30
 
-function buildPrompt({ rate, depthEstimate, userType }: CoachRequest) {
-  const audience =
-    userType === 'trainee'
-      ? 'a trainee practicing CPR in a calm training setting'
-      : 'a rescuer performing CPR in a real emergency'
-
-  return `You are PulseAid, a CPR coaching voice. Give ONE short spoken coaching cue (max 12 words) for ${audience}.
-Current compression rate: ${Math.round(rate)} per minute (target 100-120).
-Current depth estimate: ${(depthEstimate * 100).toFixed(0)}% of ideal (target ~50-60mm).
-Rules:
-- If rate < 100: tell them to push faster.
-- If rate > 120: tell them to slow down slightly.
-- If depth < 0.7: tell them to push harder/deeper.
-- If depth > 1.15: tell them to ease the depth.
-- Otherwise: give brief encouragement to maintain.
-Respond with ONLY the cue, no quotes, no extra text.`
+type CoachRequestBody = {
+  rate: number
+  depthEstimate: string | number
+  userType: 'bystander' | 'emt' | 'rescuer' | 'trainee'
 }
 
-/** Deterministic fallback so coaching never fails during an emergency. */
-function fallbackCue({ rate, depthEstimate }: CoachRequest): string {
-  if (rate > 0 && rate < 100) return 'Push faster — aim for one hundred per minute.'
-  if (rate > 120) return 'Ease the pace slightly — stay under one twenty.'
-  if (depthEstimate < 0.7) return 'Push harder and deeper, let the chest recoil.'
-  if (depthEstimate > 1.15) return 'Slightly less depth, keep it steady.'
-  if (rate === 0) return 'Begin compressions, center of the chest, push hard and fast.'
-  return 'Great rhythm — keep it steady and strong.'
+function isValidBody(body: unknown): body is CoachRequestBody {
+  if (!body || typeof body !== 'object') {
+    return false
+  }
+
+  const payload = body as Record<string, unknown>
+
+  return (
+    typeof payload.rate === 'number' &&
+    (typeof payload.depthEstimate === 'string' ||
+      typeof payload.depthEstimate === 'number') &&
+    (payload.userType === 'bystander' ||
+      payload.userType === 'emt' ||
+      payload.userType === 'rescuer' ||
+      payload.userType === 'trainee')
+  )
 }
 
-export async function POST(req: Request) {
-  let body: CoachRequest
+function normalizeDepthEstimate(depthEstimate: string | number) {
+  if (typeof depthEstimate === 'string') {
+    return depthEstimate
+  }
+
+  if (depthEstimate < 0.7) return 'too shallow'
+  if (depthEstimate > 1.15) return 'too deep'
+  return 'good'
+}
+
+function normalizeUserType(userType: CoachRequestBody['userType']) {
+  if (userType === 'emt') return 'emt'
+  return 'bystander'
+}
+
+function buildPrompt({ rate, depthEstimate, userType }: CoachRequestBody) {
+  return `You are a CPR coaching assistant. Current stats: rate=${rate} compressions/min (target 100-120), depth=${normalizeDepthEstimate(depthEstimate)}, user type=${normalizeUserType(userType)}. Give one short calm corrective instruction under 15 words.`
+}
+
+export async function POST(request: Request) {
+  if (!process.env.GEMINI_API_KEY) {
+    return Response.json(
+      { error: 'GEMINI_API_KEY is not configured.' },
+      { status: 500 },
+    )
+  }
+
+  let body: unknown
+
   try {
-    body = (await req.json()) as CoachRequest
+    body = await request.json()
   } catch {
-    body = { rate: 0, depthEstimate: 1, userType: 'rescuer' }
+    return Response.json({ error: 'Invalid JSON body.' }, { status: 400 })
+  }
+
+  if (!isValidBody(body)) {
+    return Response.json(
+      {
+        error:
+          "Body must include { rate: number, depthEstimate: string, userType: 'bystander' | 'emt' }.",
+      },
+      { status: 400 },
+    )
   }
 
   try {
-    const result = streamText({
-      model: 'openai/gpt-5-mini',
-      prompt: buildPrompt(body),
-      temperature: 0.6,
-    })
-    return result.toTextStreamResponse()
-  } catch {
-    // Stream the deterministic fallback as plain text.
-    const text = fallbackCue(body)
+    const model = new GoogleGenerativeAI(process.env.GEMINI_API_KEY).getGenerativeModel(
+      { model: 'gemini-1.5-flash' },
+    )
+    const result = await model.generateContentStream(buildPrompt(body))
+    const encoder = new TextEncoder()
+
     const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(text))
-        controller.close()
+      async start(controller) {
+        try {
+          for await (const chunk of result.stream) {
+            const text = chunk.text()
+            if (text) {
+              controller.enqueue(encoder.encode(text))
+            }
+          }
+          controller.close()
+        } catch (error) {
+          controller.error(error)
+        }
       },
     })
+
     return new Response(stream, {
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      headers: {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
     })
+  } catch (error) {
+    console.error('Gemini coaching request failed:', error)
+    return Response.json(
+      { error: 'Unable to generate coaching instruction.' },
+      { status: 500 },
+    )
   }
 }
