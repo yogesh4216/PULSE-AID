@@ -1,15 +1,30 @@
-'use client'
-
-import { useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 
 const RING_SIZE = 184
 const RING_STROKE = 12
 const RING_RADIUS = (RING_SIZE - RING_STROKE) / 2
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 
+type SearchParams = Record<string, string | string[] | undefined>
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
+}
+
+function firstValue(value: string | string[] | undefined) {
+  if (Array.isArray(value)) {
+    return value[0] ?? null
+  }
+
+  return value ?? null
+}
+
+function allValues(value: string | string[] | undefined) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean)
+  }
+
+  return value ? [value] : []
 }
 
 function readNumber(value: string | null, fallback: number) {
@@ -32,10 +47,10 @@ function normalizeDepthRating(value: string | null) {
   return 'Good'
 }
 
-function getFeedback(searchParams: ReturnType<typeof useSearchParams>) {
-  const repeatedFeedback = searchParams.getAll('feedback').filter(Boolean)
+function getFeedback(searchParams: SearchParams) {
+  const repeatedFeedback = allValues(searchParams.feedback)
   const keyedFeedback = ['feedback1', 'feedback2', 'feedback3']
-    .map((key) => searchParams.get(key))
+    .map((key) => firstValue(searchParams[key]))
     .filter((value): value is string => Boolean(value))
 
   const feedback = repeatedFeedback.length > 0 ? repeatedFeedback : keyedFeedback
@@ -51,60 +66,48 @@ function getFeedback(searchParams: ReturnType<typeof useSearchParams>) {
   ]
 }
 
-export default function SummaryPage() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const [saved, setSaved] = useState(false)
+export default async function SummaryPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>
+}) {
+  const params = await searchParams
 
-  const score = clamp(readNumber(searchParams.get('score'), 0), 0, 100)
+  const score = clamp(readNumber(firstValue(params.score), 0), 0, 100)
   const compressionCount = Math.max(
     0,
     Math.round(
-      readNumber(
-        searchParams.get('compressions') ?? searchParams.get('count'),
-        0,
-      ),
+      readNumber(firstValue(params.compressions) ?? firstValue(params.count), 0),
     ),
   )
   const avgRate = Math.max(
     0,
     Math.round(
       readNumber(
-        searchParams.get('avgRate') ?? searchParams.get('averageRate'),
+        firstValue(params.avgRate) ?? firstValue(params.averageRate),
         0,
       ),
     ),
   )
   const depthRating = normalizeDepthRating(
-    searchParams.get('depthRating') ?? searchParams.get('depth'),
+    firstValue(params.depthRating) ?? firstValue(params.depth),
   )
-  const feedback = getFeedback(searchParams)
+  const feedback = getFeedback(params)
   const progressOffset =
     RING_CIRCUMFERENCE - (score / 100) * RING_CIRCUMFERENCE
 
-  const handleSaveReport = () => {
-    const report = [
-      'PULSE-AID SESSION REPORT',
-      `Quality Score: ${score}/100`,
-      `Total Compressions: ${compressionCount}`,
-      `Average Rate: ${avgRate}/min`,
-      `Depth Rating: ${depthRating}`,
-      '',
-      'AI Coaching Feedback:',
-      ...feedback.map((item, index) => `${index + 1}. ${item}`),
-    ].join('\n')
+  const report = [
+    'PULSE-AID SESSION REPORT',
+    `Quality Score: ${score}/100`,
+    `Total Compressions: ${compressionCount}`,
+    `Average Rate: ${avgRate}/min`,
+    `Depth Rating: ${depthRating}`,
+    '',
+    'AI Coaching Feedback:',
+    ...feedback.map((item, index) => `${index + 1}. ${item}`),
+  ].join('\n')
 
-    const blob = new Blob([report], { type: 'text/plain;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-
-    link.href = url
-    link.download = `pulse-aid-session-${Date.now()}.txt`
-    link.click()
-
-    URL.revokeObjectURL(url)
-    setSaved(true)
-  }
+  const reportHref = `data:text/plain;charset=utf-8,${encodeURIComponent(report)}`
 
   return (
     <main className="min-h-dvh bg-[#0a0f1e] px-4 py-6 text-white">
@@ -207,20 +210,19 @@ export default function SummaryPage() {
         </section>
 
         <div className="mt-auto space-y-3 pt-8">
-          <button
+          <a
             className="flex min-h-14 w-full items-center justify-center rounded-2xl bg-[#ef4444] px-4 text-base font-semibold text-white transition active:scale-[0.985]"
-            onClick={handleSaveReport}
-            type="button"
+            download={`pulse-aid-session-${Date.now()}.txt`}
+            href={reportHref}
           >
-            {saved ? 'Report Saved' : 'Save Report'}
-          </button>
-          <button
+            Save Report
+          </a>
+          <Link
             className="flex min-h-14 w-full items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 text-base font-semibold text-white transition active:scale-[0.985]"
-            onClick={() => router.push('/')}
-            type="button"
+            href="/"
           >
             Start Again
-          </button>
+          </Link>
         </div>
       </div>
     </main>
